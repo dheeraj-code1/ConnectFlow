@@ -1,0 +1,39 @@
+.my-extension-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 0 24px 8px;
+  box-sizing: border-box;
+}
+
+.my-extension-header h2 {
+  margin: 0;
+}
+
+.my-extension-btn {
+  flex-shrink: 0;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 24px;
+  background: #0a66c2;
+  color: #fff;
+  font: 600 14px/1.2 system-ui, sans-serif;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.my-extension-btn:hover:not(:disabled) {
+  background: #004182;
+}
+
+.my-extension-btn:disabled {
+  opacity: 0.7;
+  cursor: wait;
+}
+
+.my-extension-header--standalone {
+  justify-content: flex-end;
+  padding: 16px 24px 8px;
+}
