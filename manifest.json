@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "Page Button Extension",
+  "name": "ConnectFlow",
   "version": "1.0.0",
-  "description": "Injects a Connect All button on LinkedIn company people pages.",
-  "permissions": ["webNavigation"],
+  "description": "Bulk connect on LinkedIn company People pages — one click, many connections.",
+  "permissions": ["webNavigation", "storage"],
   "host_permissions": [
     "https://www.linkedin.com/*"
   ],

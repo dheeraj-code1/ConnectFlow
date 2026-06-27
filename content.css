@@ -12,6 +12,24 @@
   margin: 0;
 }
 
+.my-extension-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.my-extension-stats {
+  font: 500 12px/1.2 system-ui, sans-serif;
+  color: #666;
+  white-space: nowrap;
+}
+
+.my-extension-stats--limit {
+  color: #c62828;
+  font-weight: 600;
+}
+
 .my-extension-btn {
   flex-shrink: 0;
   padding: 8px 16px;

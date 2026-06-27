@@ -2,6 +2,7 @@
   "use strict";
 
   const BUTTON_ID = "my-extension-connect-all-btn";
+  const STATS_ID = "my-extension-stats";
   const HEADING_CLASS = "wABVuRYChPnxETqtxOjZNnPsdLHQovkevMdxNA";
   const HEADING_TEXT = "People you may know";
   const CARD_SELECTOR =
@@ -10,6 +11,8 @@
   const CONNECT_SELECTOR = "footer button.artdeco-button";
   const TARGET_URL_PATTERN =
     /^https:\/\/www\.linkedin\.com\/company\/[^/?#]+\/people/i;
+  const STORAGE_KEY = "connectFlowDaily";
+  const DAILY_LIMIT = 10;
   const CLICK_DELAY_MS = 1200;
   const URL_CHECK_INTERVAL_MS = 400;
 
@@ -21,6 +24,61 @@
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function getTodayDate() {
+    return new Date().toISOString().slice(0, 10);
+  }
+
+  function getCompanyFromUrl(url = location.href) {
+    const match = url.match(/linkedin\.com\/company\/([^/?#]+)\/people/i);
+    return match ? decodeURIComponent(match[1]).toLowerCase() : null;
+  }
+
+  function getStorageData() {
+    return new Promise((resolve) => {
+      chrome.storage.local.get(STORAGE_KEY, (result) => {
+        resolve(result[STORAGE_KEY] || { date: getTodayDate(), counts: {} });
+      });
+    });
+  }
+
+  function saveStorageData(data) {
+    return new Promise((resolve) => {
+      chrome.storage.local.set({ [STORAGE_KEY]: data }, resolve);
+    });
+  }
+
+  async function getDailyRecord() {
+    const stored = await getStorageData();
+    const today = getTodayDate();
+
+    if (stored.date !== today) {
+      return { date: today, counts: {} };
+    }
+
+    return stored;
+  }
+
+  async function getCompanyConnectCount(company) {
+    if (!company) {
+      return 0;
+    }
+
+    const record = await getDailyRecord();
+    return record.counts[company] || 0;
+  }
+
+  async function incrementCompanyConnectCount(company) {
+    const record = await getDailyRecord();
+    record.counts[company] = (record.counts[company] || 0) + 1;
+    await saveStorageData(record);
+    return record.counts[company];
+  }
+
+  async function getRemainingConnects(company) {
+    const count = await getCompanyConnectCount(company);
+    return Math.max(0, DAILY_LIMIT - count);
   }
 
   function isLinkedInPage() {
@@ -102,41 +160,103 @@
     return false;
   }
 
-  async function onButtonClick(event) {
-    const button = event.currentTarget;
+  async function updateStatsDisplay() {
+    const statsEl = document.getElementById(STATS_ID);
+    const button = document.getElementById(BUTTON_ID);
+    const company = getCompanyFromUrl();
     const card = getTargetCard();
 
-    if (!card) {
+    if (!statsEl || !company) {
       return;
     }
 
-    const connectButtons = getConnectButtons(card);
+    const sentToday = await getCompanyConnectCount(company);
+    const onPage = card ? getConnectButtons(card).length : 0;
+    const remaining = Math.max(0, DAILY_LIMIT - sentToday);
 
-    if (!connectButtons.length) {
-      button.textContent = "No Connect buttons";
+    statsEl.textContent = `${sentToday}/${DAILY_LIMIT} sent today · ${onPage} on page`;
+    statsEl.classList.toggle("my-extension-stats--limit", sentToday >= DAILY_LIMIT);
+
+    if (button) {
+      button.disabled = sentToday >= DAILY_LIMIT;
+      button.title =
+        sentToday >= DAILY_LIMIT
+          ? `Daily limit reached for ${company} (${DAILY_LIMIT}/day)`
+          : `${remaining} connect(s) left today for ${company}`;
+    }
+  }
+
+  async function onButtonClick(event) {
+    const button = event.currentTarget;
+    const card = getTargetCard();
+    const company = getCompanyFromUrl();
+
+    if (!card || !company) {
+      return;
+    }
+
+    let sentToday = await getCompanyConnectCount(company);
+    if (sentToday >= DAILY_LIMIT) {
+      button.textContent = "Daily limit reached";
+      await updateStatsDisplay();
       await sleep(1500);
       button.textContent = "Connect All";
       return;
     }
 
+    const connectButtons = getConnectButtons(card);
+    const remaining = DAILY_LIMIT - sentToday;
+    const buttonsToClick = connectButtons.slice(0, remaining);
+
+    if (!buttonsToClick.length) {
+      button.textContent = "No Connect buttons";
+      await sleep(1500);
+      button.textContent = "Connect All";
+      await updateStatsDisplay();
+      return;
+    }
+
     button.disabled = true;
 
-    for (let i = 0; i < connectButtons.length; i++) {
-      const connectBtn = connectButtons[i];
+    for (let i = 0; i < buttonsToClick.length; i++) {
+      sentToday = await getCompanyConnectCount(company);
+      if (sentToday >= DAILY_LIMIT) {
+        break;
+      }
 
+      const connectBtn = buttonsToClick[i];
       if (!connectBtn.isConnected || connectBtn.disabled) {
         continue;
       }
 
-      button.textContent = `Connecting ${i + 1}/${connectButtons.length}...`;
+      button.textContent = `Connecting ${i + 1}/${buttonsToClick.length}...`;
       connectBtn.click();
       await sleep(600);
       clickSendOnModal();
+      await incrementCompanyConnectCount(company);
+      await updateStatsDisplay();
       await sleep(CLICK_DELAY_MS);
     }
 
     button.disabled = false;
     button.textContent = "Connect All";
+    await updateStatsDisplay();
+  }
+
+  function createActionsBlock() {
+    const actions = document.createElement("div");
+    actions.className = "my-extension-actions";
+
+    const stats = document.createElement("span");
+    stats.id = STATS_ID;
+    stats.className = "my-extension-stats";
+    stats.textContent = `0/${DAILY_LIMIT} sent today`;
+
+    const button = createButton();
+    actions.appendChild(stats);
+    actions.appendChild(button);
+
+    return actions;
   }
 
   function createButton() {
@@ -180,27 +300,29 @@
     }
 
     if (isButtonInCard(card)) {
+      updateStatsDisplay();
       return true;
     }
 
     removeInjectedButton();
 
-    const button = createButton();
     const wrapper = document.createElement("div");
     wrapper.className = "my-extension-header";
+    const actions = createActionsBlock();
 
     const heading = findHeadingInCard(card) || card.querySelector("h2");
 
     if (heading && heading.parentNode && !heading.closest(".my-extension-header")) {
       heading.parentNode.insertBefore(wrapper, heading);
       wrapper.appendChild(heading);
-      wrapper.appendChild(button);
+      wrapper.appendChild(actions);
     } else {
       wrapper.classList.add("my-extension-header--standalone");
       card.insertBefore(wrapper, card.firstChild);
-      wrapper.appendChild(button);
+      wrapper.appendChild(actions);
     }
 
+    updateStatsDisplay();
     return true;
   }
 
@@ -236,6 +358,8 @@
       cardObserver = new MutationObserver(() => {
         if (isTargetPage() && !isButtonInCard(card)) {
           injectButton();
+        } else {
+          updateStatsDisplay();
         }
       });
 
