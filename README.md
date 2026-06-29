@@ -19,11 +19,12 @@ This is step one. The longer-term goal is to automate more of the referral workf
 ## Features
 
 - **Connect All** — clicks every **Connect** button in the target card (skips **Message** / **Follow**)
-- **Daily limit** — max **7 connects per company per day** (configurable)
-- **Live stats** — shows `3/7 sent today · 4 on page` next to the button
-- **Auto-send** — clicks **Send** / **Send without a note** on LinkedIn’s invite modal
-- **SPA-aware** — works when navigating to `/people` without a full page reload
-- **Search-safe** — re-injects the button when the card reloads after keyword search
+- **Daily limit** — max **10 connects per company per day** (configurable via `DAILY_LIMIT`)
+- **Live stats** — shows `3/10 sent today · 4 on page` next to the button
+- **Auto-send** — polls for and clicks **Send** / **Send without a note** on LinkedIn’s invite modal
+- **Fast storage** — in-memory reads with persistent saves to disk
+- **SPA-aware** — works when navigating to `/people` without a full page reload (`background.js`)
+- **Search-safe** — re-injects the button when the card reloads after keyword search (debounced)
 
 ---
 
@@ -32,7 +33,7 @@ This is step one. The longer-term goal is to automate more of the referral workf
 1. See a job posting on LinkedIn
 2. Open the company page → **People**
 3. Search keywords for your target role (e.g. `data engineer`)
-4. Check stats — e.g. `2/7 sent today · 5 on page`
+4. Check stats — e.g. `2/10 sent today · 5 on page`
 5. Click **Connect All**
 6. Move to the next company and repeat
 
@@ -73,11 +74,11 @@ On URL change + every 400ms (+ background.js on SPA nav):
   │     ├── No  → remove button
   │     └── Yes → find target card → inject Connect All + stats
   └── On Connect All click:
-        ├── Read today's count for company from chrome.storage.local
-        ├── Stop if daily limit (7) reached
-        ├── Click Connect buttons (up to remaining limit)
-        ├── Increment count after each click
-        └── Auto-click Send on invite modal
+        ├── Load counts from memory (instant)
+        ├── Stop if daily limit reached
+        ├── Click first Connect button → poll modal → click Send
+        ├── Increment count in memory → persist to disk
+        └── Repeat until limit reached or no Connect buttons left
 ```
 
 ### Target page URL
@@ -115,9 +116,22 @@ url.match(/linkedin\.com\/company\/([^/?#]+)\/people/i)
 
 ---
 
-## Storage
+## Storage (fast + persistent)
 
-Uses **`chrome.storage.local`** (extension storage — persists across browser restarts, isolated from LinkedIn’s site data).
+ConnectFlow uses a **two-layer storage** pattern:
+
+```
+memoryStore (RAM)          ← instant reads/writes during session
+       ↓ persist (debounced 300ms + flush on connect finish)
+chrome.storage.local (disk) ← survives browser restart
+```
+
+| Action | Layer | Speed |
+|--------|-------|-------|
+| Read count | `memoryStore` | Instant |
+| Increment on connect | `memoryStore` + disk | Instant UI, async save |
+| Page load | Disk → memory (once) | One read per tab |
+| Browser restart | Load from disk | Persistent |
 
 **Storage key:** `connectFlowDaily`
 
@@ -129,7 +143,7 @@ Uses **`chrome.storage.local`** (extension storage — persists across browser r
     "date": "2026-06-27",
     "counts": {
       "lenovo": 3,
-      "google": 7
+      "google": 10
     }
   }
 }
@@ -141,18 +155,19 @@ Uses **`chrome.storage.local`** (extension storage — persists across browser r
 | `counts` | `{ company_slug: connect_count }` for today |
 
 **Rules:**
-- 7 connects max per company per day
+- 10 connects max per company per day (default)
 - Counts reset automatically at midnight (new date)
 - Each company is tracked separately
+- Storage is **never** read on every DOM mutation (prevents page freeze)
 
 **Inspect storage:**  
 `chrome://extensions` → ConnectFlow → Details → Extension storage,  
 or DevTools → Application → Extension storage.
 
-**Change daily limit:** edit `DAILY_LIMIT` in `content.js`:
+**Change daily limit** — edit `DAILY_LIMIT` in `content.js`:
 
 ```js
-const DAILY_LIMIT = 7;
+const DAILY_LIMIT = 10;
 ```
 
 ---
@@ -162,16 +177,31 @@ const DAILY_LIMIT = 7;
 | Permission | Why |
 |------------|-----|
 | `webNavigation` | Detect SPA navigation to `/people` without full reload |
-| `storage` | Save daily connect counts per company |
+| `storage` | Persist daily connect counts per company |
 | `host_permissions: linkedin.com/*` | Run content script on LinkedIn |
+
+---
+
+## Debug
+
+1. Open LinkedIn people page → **F12** → **Console**
+2. Reload extension + refresh tab after code changes
+3. Find `content.js` under **Sources → Content scripts**
+4. Check storage in Console:
+
+```javascript
+chrome.storage.local.get("connectFlowDaily", console.log)
+```
 
 ---
 
 ## Roadmap
 
 - [x] Bulk connect on company people pages
-- [x] Daily per-company connect limit with `chrome.storage.local`
+- [x] Daily per-company connect limit
 - [x] Connect stats on current page
+- [x] Fast in-memory storage with persistent disk backup
+- [x] Invite modal polling (Send without a note)
 - [ ] Custom connection note template
 - [ ] Track who was already contacted
 - [ ] Automate referral / follow-up messages
@@ -184,6 +214,7 @@ const DAILY_LIMIT = 7;
 - Use responsibly. Bulk connecting may trigger LinkedIn rate limits or account restrictions.
 - ConnectFlow is a personal automation tool, not affiliated with LinkedIn.
 - LinkedIn’s UI changes often — if the button stops appearing, the card selector or heading text may need updating.
+- Required delays between connects (~1.2s) and modal polling (~5s max) are intentional to handle LinkedIn’s async UI.
 
 ---
 
