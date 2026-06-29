@@ -15,12 +15,84 @@
   const DAILY_LIMIT = 10;
   const CLICK_DELAY_MS = 1200;
   const URL_CHECK_INTERVAL_MS = 400;
+  const MODAL_WAIT_MS = 5000;
+  const MODAL_POLL_MS = 200;
 
   let lastUrl = location.href;
   let cardObserver = null;
   let pageObserver = null;
   let observedCard = null;
   let started = false;
+  let isConnecting = false;
+  let injectDebounceTimer = null;
+
+  // Fast + persistent: reads from memory, writes to memory + disk
+  let memoryStore = null;
+  let memoryLoadPromise = null;
+  let persistTimer = null;
+
+  function freshRecord() {
+    return { date: getTodayDate(), counts: {} };
+  }
+
+  function normalizeRecord(record) {
+    if (!record || record.date !== getTodayDate()) {
+      return freshRecord();
+    }
+    if (!record.counts) {
+      record.counts = {};
+    }
+    return record;
+  }
+
+  function loadMemoryStore() {
+    if (memoryStore) {
+      return Promise.resolve(memoryStore);
+    }
+    if (!memoryLoadPromise) {
+      memoryLoadPromise = getStorageData().then((stored) => {
+        memoryStore = normalizeRecord(stored);
+        return memoryStore;
+      });
+    }
+    return memoryLoadPromise;
+  }
+
+  function getCountSync(company) {
+    if (!company || !memoryStore) {
+      return 0;
+    }
+    return memoryStore.counts[company] || 0;
+  }
+
+  async function getCount(company) {
+    if (!company) {
+      return 0;
+    }
+    await loadMemoryStore();
+    return getCountSync(company);
+  }
+
+  function incrementCount(company) {
+    if (!memoryStore) {
+      memoryStore = freshRecord();
+    }
+    memoryStore.counts[company] = (memoryStore.counts[company] || 0) + 1;
+    schedulePersist();
+    return memoryStore.counts[company];
+  }
+
+  function schedulePersist() {
+    clearTimeout(persistTimer);
+    persistTimer = setTimeout(persistNow, 300);
+  }
+
+  function persistNow() {
+    clearTimeout(persistTimer);
+    if (memoryStore) {
+      saveStorageData(memoryStore);
+    }
+  }
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -37,48 +109,28 @@
 
   function getStorageData() {
     return new Promise((resolve) => {
-      chrome.storage.local.get(STORAGE_KEY, (result) => {
-        resolve(result[STORAGE_KEY] || { date: getTodayDate(), counts: {} });
-      });
+      try {
+        chrome.storage.local.get(STORAGE_KEY, (result) => {
+          if (chrome.runtime.lastError) {
+            resolve({ date: getTodayDate(), counts: {} });
+            return;
+          }
+          resolve(result[STORAGE_KEY] || { date: getTodayDate(), counts: {} });
+        });
+      } catch {
+        resolve({ date: getTodayDate(), counts: {} });
+      }
     });
   }
 
   function saveStorageData(data) {
     return new Promise((resolve) => {
-      chrome.storage.local.set({ [STORAGE_KEY]: data }, resolve);
+      try {
+        chrome.storage.local.set({ [STORAGE_KEY]: data }, () => resolve());
+      } catch {
+        resolve();
+      }
     });
-  }
-
-  async function getDailyRecord() {
-    const stored = await getStorageData();
-    const today = getTodayDate();
-
-    if (stored.date !== today) {
-      return { date: today, counts: {} };
-    }
-
-    return stored;
-  }
-
-  async function getCompanyConnectCount(company) {
-    if (!company) {
-      return 0;
-    }
-
-    const record = await getDailyRecord();
-    return record.counts[company] || 0;
-  }
-
-  async function incrementCompanyConnectCount(company) {
-    const record = await getDailyRecord();
-    record.counts[company] = (record.counts[company] || 0) + 1;
-    await saveStorageData(record);
-    return record.counts[company];
-  }
-
-  async function getRemainingConnects(company) {
-    const count = await getCompanyConnectCount(company);
-    return Math.max(0, DAILY_LIMIT - count);
   }
 
   function isLinkedInPage() {
@@ -134,50 +186,54 @@
     return [...card.querySelectorAll(CONNECT_SELECTOR)].filter(isConnectButton);
   }
 
-  function clickSendOnModal() {
-    const sendButton = [...document.querySelectorAll("button.artdeco-button")].find(
-      (btn) => {
-        const text = (
-          btn.querySelector(".artdeco-button__text")?.textContent || ""
-        )
-          .trim()
-          .toLowerCase();
-        const ariaLabel = (btn.getAttribute("aria-label") || "").toLowerCase();
+  function findSendButton() {
+    return [...document.querySelectorAll("button.artdeco-button")].find((btn) => {
+      const text = (btn.querySelector(".artdeco-button__text")?.textContent || "")
+        .trim()
+        .toLowerCase();
+      const ariaLabel = (btn.getAttribute("aria-label") || "").toLowerCase();
 
-        return (
-          text === "send without a note" ||
-          text === "send" ||
-          ariaLabel.includes("send invitation")
-        );
+      return (
+        text === "send without a note" ||
+        text === "send" ||
+        ariaLabel === "send without a note" ||
+        ariaLabel.includes("send invitation")
+      );
+    });
+  }
+
+  async function clickSendOnModal() {
+    const deadline = Date.now() + MODAL_WAIT_MS;
+
+    while (Date.now() < deadline) {
+      const sendButton = findSendButton();
+      if (sendButton) {
+        sendButton.click();
+        await sleep(300);
+        return true;
       }
-    );
-
-    if (sendButton) {
-      sendButton.click();
-      return true;
+      await sleep(MODAL_POLL_MS);
     }
 
     return false;
   }
 
-  async function updateStatsDisplay() {
+  function renderStats(sentToday, card) {
     const statsEl = document.getElementById(STATS_ID);
     const button = document.getElementById(BUTTON_ID);
     const company = getCompanyFromUrl();
-    const card = getTargetCard();
 
     if (!statsEl || !company) {
       return;
     }
 
-    const sentToday = await getCompanyConnectCount(company);
     const onPage = card ? getConnectButtons(card).length : 0;
     const remaining = Math.max(0, DAILY_LIMIT - sentToday);
 
     statsEl.textContent = `${sentToday}/${DAILY_LIMIT} sent today · ${onPage} on page`;
     statsEl.classList.toggle("my-extension-stats--limit", sentToday >= DAILY_LIMIT);
 
-    if (button) {
+    if (button && !isConnecting) {
       button.disabled = sentToday >= DAILY_LIMIT;
       button.title =
         sentToday >= DAILY_LIMIT
@@ -186,61 +242,105 @@
     }
   }
 
+  async function updateStatsDisplay() {
+    const company = getCompanyFromUrl();
+    const card = getTargetCard();
+
+    if (!company || !document.getElementById(STATS_ID)) {
+      return;
+    }
+
+    let sentToday = getCountSync(company);
+    if (!memoryStore) {
+      sentToday = await getCount(company);
+    }
+
+    renderStats(sentToday, card);
+  }
+
   async function onButtonClick(event) {
     const button = event.currentTarget;
-    const card = getTargetCard();
     const company = getCompanyFromUrl();
 
-    if (!card || !company) {
+    if (isConnecting || !company) {
       return;
     }
 
-    let sentToday = await getCompanyConnectCount(company);
-    if (sentToday >= DAILY_LIMIT) {
-      button.textContent = "Daily limit reached";
-      await updateStatsDisplay();
-      await sleep(1500);
-      button.textContent = "Connect All";
+    const card = getTargetCard();
+    if (!card) {
       return;
     }
 
-    const connectButtons = getConnectButtons(card);
-    const remaining = DAILY_LIMIT - sentToday;
-    const buttonsToClick = connectButtons.slice(0, remaining);
-
-    if (!buttonsToClick.length) {
-      button.textContent = "No Connect buttons";
-      await sleep(1500);
-      button.textContent = "Connect All";
-      await updateStatsDisplay();
-      return;
-    }
-
+    // Instant feedback — don't wait for storage first
+    isConnecting = true;
     button.disabled = true;
+    button.textContent = "Starting...";
 
-    for (let i = 0; i < buttonsToClick.length; i++) {
-      sentToday = await getCompanyConnectCount(company);
+    let sentToday;
+    try {
+      await loadMemoryStore();
+      sentToday = getCountSync(company);
       if (sentToday >= DAILY_LIMIT) {
-        break;
+        button.textContent = "Daily limit reached";
+        await updateStatsDisplay();
+        await sleep(1500);
+        return;
       }
 
-      const connectBtn = buttonsToClick[i];
-      if (!connectBtn.isConnected || connectBtn.disabled) {
-        continue;
+      const initialCount = getConnectButtons(card).length;
+      if (!initialCount) {
+        button.textContent = "No Connect buttons";
+        await sleep(1500);
+        await updateStatsDisplay();
+        return;
       }
 
-      button.textContent = `Connecting ${i + 1}/${buttonsToClick.length}...`;
-      connectBtn.click();
-      await sleep(600);
-      clickSendOnModal();
-      await incrementCompanyConnectCount(company);
+      let clicked = 0;
+
+      while (clicked < initialCount) {
+        if (sentToday >= DAILY_LIMIT) {
+          break;
+        }
+
+        const currentCard = getTargetCard();
+        if (!currentCard) {
+          break;
+        }
+
+        const connectButtons = getConnectButtons(currentCard);
+        if (!connectButtons.length) {
+          break;
+        }
+
+        const connectBtn = connectButtons[0];
+        if (!connectBtn.isConnected || connectBtn.disabled) {
+          break;
+        }
+
+        clicked += 1;
+        button.textContent = `Connecting ${clicked}...`;
+        connectBtn.click();
+        await sleep(600);
+
+        const sent = await clickSendOnModal();
+        if (sent) {
+          sentToday = incrementCount(company);
+          statsElUpdate(sentToday, currentCard);
+        }
+
+        await sleep(CLICK_DELAY_MS);
+      }
+    } finally {
+      isConnecting = false;
+      button.disabled = false;
+      button.textContent = "Connect All";
+      persistNow();
       await updateStatsDisplay();
-      await sleep(CLICK_DELAY_MS);
     }
+  }
 
-    button.disabled = false;
-    button.textContent = "Connect All";
-    await updateStatsDisplay();
+  function statsElUpdate(sentToday, card) {
+    renderStats(sentToday, card);
   }
 
   function createActionsBlock() {
@@ -270,6 +370,10 @@
   }
 
   function removeInjectedButton() {
+    if (isConnecting) {
+      return;
+    }
+
     const button = document.getElementById(BUTTON_ID);
     if (!button) {
       return;
@@ -294,13 +398,16 @@
   }
 
   function injectButton() {
+    if (isConnecting) {
+      return true;
+    }
+
     const card = getTargetCard();
     if (!card) {
       return false;
     }
 
     if (isButtonInCard(card)) {
-      updateStatsDisplay();
       return true;
     }
 
@@ -326,6 +433,15 @@
     return true;
   }
 
+  function scheduleInject() {
+    clearTimeout(injectDebounceTimer);
+    injectDebounceTimer = setTimeout(() => {
+      if (!isConnecting && isTargetPage()) {
+        watchTargetCard();
+      }
+    }, 300);
+  }
+
   function resetCardObserver() {
     if (cardObserver) {
       cardObserver.disconnect();
@@ -342,6 +458,10 @@
   }
 
   function watchTargetCard() {
+    if (isConnecting) {
+      return true;
+    }
+
     if (observedCard && !observedCard.isConnected) {
       resetCardObserver();
     }
@@ -356,10 +476,11 @@
       observedCard = card;
 
       cardObserver = new MutationObserver(() => {
+        if (isConnecting) {
+          return;
+        }
         if (isTargetPage() && !isButtonInCard(card)) {
-          injectButton();
-        } else {
-          updateStatsDisplay();
+          scheduleInject();
         }
       });
 
@@ -383,8 +504,11 @@
     }
 
     pageObserver = new MutationObserver(() => {
+      if (isConnecting) {
+        return;
+      }
       if (isTargetPage()) {
-        watchTargetCard();
+        scheduleInject();
       }
     });
 
@@ -395,6 +519,9 @@
   }
 
   function cleanup() {
+    if (isConnecting) {
+      return;
+    }
     removeInjectedButton();
     resetCardObserver();
     resetPageObserver();
@@ -411,6 +538,10 @@
   }
 
   function checkUrlAndRun() {
+    if (isConnecting) {
+      return;
+    }
+
     const currentUrl = location.href;
     const wasTarget = TARGET_URL_PATTERN.test(lastUrl);
     const onTarget = isTargetPage();
@@ -448,6 +579,9 @@
   }
 
   function queueCheck() {
+    if (isConnecting) {
+      return;
+    }
     checkUrlAndRun();
     setTimeout(checkUrlAndRun, 300);
     setTimeout(checkUrlAndRun, 800);
@@ -458,6 +592,9 @@
     document.addEventListener(
       "click",
       (event) => {
+        if (isConnecting) {
+          return;
+        }
         const target = event.target;
         if (!(target instanceof Element)) {
           return;
@@ -478,13 +615,15 @@
     }
     started = true;
 
+    loadMemoryStore();
+
     hookSpaNavigation();
     hookClicks();
     checkUrlAndRun();
     setInterval(checkUrlAndRun, URL_CHECK_INTERVAL_MS);
 
     chrome.runtime.onMessage.addListener((message) => {
-      if (message.type === "RUN_INJECT") {
+      if (message.type === "RUN_INJECT" && !isConnecting) {
         queueCheck();
       }
     });
